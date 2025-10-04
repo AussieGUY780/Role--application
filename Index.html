@@ -1,0 +1,294 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CodeNova AI Quiz System</title>
+<script src="https://js.puter.com/v2/"></script>
+<style>
+body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background:#f0f4f8; margin:0; padding:0;}
+header { background:#1e90ff; color:white; padding:20px; text-align:center;}
+main { max-width:900px; margin:40px auto; background:white; padding:30px; border-radius:12px; box-shadow:0 8px 20px rgba(0,0,0,0.1);}
+h1{margin-top:0;text-align:center;}
+.question{margin-bottom:20px;}
+textarea, select, input{width:100%;padding:10px;border-radius:6px;border:1px solid #ccc;margin-top:5px;}
+button{background:#1e90ff;color:white;border:none;padding:12px 20px;border-radius:6px;cursor:pointer;font-size:16px;}
+button:hover{background:#0f78d1;}
+#result{margin-top:20px;padding:15px;border-radius:8px;background:#eef2f7;white-space:pre-wrap;}
+.correct{color:green;}
+.partial{color:orange;}
+.review{color:red;}
+.note{font-size:13px;color:#475569;margin-top:8px;}
+footer{margin-top:20px;text-align:center;color:#64748b;font-size:13px}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>CodeNova AI Quiz Portal</h1>
+</header>
+
+<main>
+  <label for="username">Roblox Username:</label>
+  <input type="text" id="username" placeholder="Enter your Roblox username">
+
+  <button id="verifyBtn">Verify Username</button>
+  <div id="verifyResult" class="note"></div>
+
+  <div class="role-select" style="margin-top:20px;">
+    <label for="role">Select Role You Are Applying For:</label><br>
+    <select id="role">
+      <option value="">Select role</option>
+      <option value="Developer">Developer</option>
+      <option value="Moderator">Moderator</option>
+      <option value="Tester">Tester</option>
+      <option value="Manager">Manager</option>
+      <option value="Studio Partner">Studio Partner</option>
+    </select>
+  </div>
+
+  <div id="quizSection" style="margin-top:20px;">
+    <div id="questionsContainer">
+      <p>Verify username first to start generating questions...</p>
+    </div>
+    <button type="button" id="submitPracticeBtn" style="display:none;" onclick="submitPractice()">Submit Practice</button>
+  </div>
+
+  <div id="result"></div>
+
+  <!-- Hidden Formspree form -->
+  <form id="emailForm" action="https://formspree.io/f/mldpnqgj" method="POST" style="display:none;">
+    <input type="text" name="username" id="emailName">
+    <input type="text" name="role" id="emailRole">
+    <input type="text" name="practiceScore" id="emailPractice">
+    <input type="text" name="mainScore" id="emailMain">
+    <input type="text" name="comments" id="emailComments">
+  </form>
+
+  <footer class="note">Practice 5 → pass → Main 20 (progressive difficulty). Uses Puter.js (o3-mini).</footer>
+</main>
+
+<script>
+let practiceQuestions = [];
+let mainQuestions = [];
+let roleSelected = "";
+let practicePassed = false;
+let usernameVerified = false;
+const MODEL = "o3-mini";
+
+/* --------------- Helper Functions --------------- */
+function escapeHtml(s){ return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+function extractJSONArrayRobust(aiText){
+    try {
+        if (typeof aiText !== 'string') aiText = String(aiText);
+        const jsonBlockMatch = aiText.match(/<JSON>([\s\S]*?)<\/JSON>/i);
+        if(jsonBlockMatch && jsonBlockMatch[1]) return JSON.parse(jsonBlockMatch[1].trim());
+        const firstBracket = aiText.indexOf("[");
+        const lastBracket = aiText.lastIndexOf("]");
+        if(firstBracket===-1||lastBracket===-1||lastBracket<=firstBracket) throw new Error("No JSON array found");
+        let jsonStr = aiText.slice(firstBracket, lastBracket+1);
+        jsonStr = jsonStr.replace(/,\s*([\]}])/g,'$1');
+        jsonStr = jsonStr.replace(/\r?\n/g," ");
+        const parsed = JSON.parse(jsonStr);
+        if(!Array.isArray(parsed)) throw new Error("Parsed data is not array");
+        return parsed;
+    } catch(err){
+        console.error("JSON parse error:", err, "AI Text:", aiText);
+        return null;
+    }
+}
+
+async function aiChat(prompt){
+  try {
+    const resp = await puter.ai.chat(prompt, { model: MODEL });
+    let txt = "";
+    if(typeof resp === "string") txt = resp;
+    else if(resp && typeof resp === "object"){
+      if(typeof resp.text === "string") txt = resp.text;
+      else if(resp.message && typeof resp.message === "string") txt = resp.message;
+      else if(resp.message?.content) txt = resp.message.content;
+      else if(Array.isArray(resp.choices) && resp.choices[0]) txt = resp.choices[0].message?.content ?? resp.choices[0].text ?? JSON.stringify(resp.choices[0]);
+      else txt = JSON.stringify(resp);
+    } else txt = String(resp);
+    return txt.trim();
+  } catch(err){
+    throw err;
+  }
+}
+
+// Track users who already completed the main test
+let completedUsers = JSON.parse(localStorage.getItem("completedUsers") || "[]");
+
+/* --------------- Roblox Verification --------------- */
+document.getElementById("verifyBtn").addEventListener("click", async ()=>{
+    const username = document.getElementById("username").value.trim();
+    if(!username){ alert("Enter a username"); return; }
+
+    // Check if user already completed test
+    if(completedUsers.includes(username)){
+        document.getElementById("verifyResult").textContent = `⚠️ ${username} has already completed the test!`;
+        document.getElementById("quizSection").style.display = "none";
+        return;
+    }
+
+    document.getElementById("verifyResult").textContent = "Verifying username... ⏳";
+
+    try{
+        const resp = await fetch(`https://065c1dd3-4f34-44ab-bad4-8aaacb839180-00-a77nblgwcrxg.riker.replit.dev/verify/${username}`);
+        const data = await resp.json();
+        if(data.success){
+            usernameVerified = true;
+            document.getElementById("verifyResult").textContent = `✅ ${username} exists on Roblox! You can start the test.`;
+        } else {
+            usernameVerified = false;
+            document.getElementById("verifyResult").textContent = `❌ Verification failed: ${data.message}`;
+        }
+    } catch(err){
+        usernameVerified = false;
+        document.getElementById("verifyResult").textContent = "❌ Verification failed: Could not reach verification server.";
+    }
+});
+
+/* --------------- Generate AI Questions --------------- */
+async function generateQuestions(role,isPractice=true){
+    if(!usernameVerified){ alert("Verify username first!"); return; }
+    const count = isPractice ? 5 : 20;
+    const difficulty = isPractice ? "easy to medium" : "progressive up to very hard";
+    const prompt = `You are a Roblox Studio expert. Generate EXACTLY ${count} unique questions for the role "${role}". Questions should be ${difficulty}. Include Lua coding, Roblox Studio concepts, and multiple-choice where appropriate. Return ONLY a JSON array.`;
+    try{
+        const aiResponse = await aiChat(prompt);
+        const parsed = extractJSONArrayRobust(aiResponse);
+        if(!parsed) throw new Error("Failed to parse AI questions");
+        const normalized = parsed.map((q,idx)=>({id:q.id??idx+1,type:q.type||"text",question:q.question||`Question ${idx+1}`,options:Array.isArray(q.options)?q.options:undefined}));
+        if(isPractice) practiceQuestions = normalized;
+        else mainQuestions = normalized;
+        renderQuestions(isPractice);
+    } catch(err){
+        document.getElementById("questionsContainer").textContent = "Failed to generate questions: "+(err.message||err);
+    }
+}
+
+/* --------------- Render Questions --------------- */
+function renderQuestions(isPractice=true){
+    const container = document.getElementById("questionsContainer");
+    container.innerHTML = "";
+    const questions = isPractice ? practiceQuestions : mainQuestions;
+    questions.forEach(q=>{
+        let el = document.createElement("div");
+        el.className = "question";
+        if(q.type==="mcq" && Array.isArray(q.options)){
+            let options = q.options.map(o=>`<option value="${escapeHtml(o)}">${escapeHtml(o)}</option>`).join("");
+            el.innerHTML = `<label>${escapeHtml(q.id)}. ${escapeHtml(q.question)}</label><br><select id="q${q.id}"><option value="">Select answer</option>${options}</select>`;
+        } else el.innerHTML = `<label>${escapeHtml(q.id)}. ${escapeHtml(q.question)}</label><br><textarea id="q${q.id}" rows="3"></textarea>`;
+        container.appendChild(el);
+    });
+    document.getElementById("submitPracticeBtn").style.display = isPractice?"inline-block":"none";
+    if(!isPractice){
+        const existingSubmit = document.getElementById('__submitMainBtn');
+        if(!existingSubmit){
+            const submitBtn = document.createElement("button");
+            submitBtn.id = '__submitMainBtn';
+            submitBtn.textContent = "Submit Main Test";
+            submitBtn.onclick = submitMainTest;
+            container.insertAdjacentElement('afterend',submitBtn);
+        }
+    }
+}
+
+/* --------------- Role Selection --------------- */
+document.getElementById("role").addEventListener("change", async function(){
+    roleSelected = this.value;
+    if(!usernameVerified){ alert("Verify username first!"); return; }
+    if(roleSelected){
+        document.getElementById("questionsContainer").innerHTML = "<p>Loading 5 AI-generated practice questions... ⏳</p>";
+        await generateQuestions(roleSelected,true);
+    }
+});
+
+/* --------------- Submit Practice --------------- */
+async function submitPractice(){
+    if(!usernameVerified){ alert("Verify username first!"); return; }
+    const resultDiv = document.getElementById("result");
+    resultDiv.textContent = "Evaluating practice answers... ⏳";
+
+    const answersArr = practiceQuestions.map(q=>({id:q.id,answer:(document.getElementById("q"+q.id)?.value||"")}));
+    const answersText = answersArr.map(a=>`${a.id}. ${a.answer}`).join("\n\n");
+    const prompt = `You are a Roblox Studio and Lua expert. Grade these ${practiceQuestions.length} answers for ${roleSelected}. Return JSON array [{"id":1,"score":95,"comment":"Good answer","review":false},...] Applicant Answers:\n${answersText}`;
+
+    try{
+        const aiResponse = await aiChat(prompt);
+        const grades = extractJSONArrayRobust(aiResponse);
+        if(!grades) throw new Error("AI evaluation failed");
+
+        let html="", total=0;
+        grades.forEach(g=>{
+            const score = Number(g.score)||0;
+            total+=score;
+            const cls = g.review?"review":(score>=70?"correct":"partial");
+            html+=`<p class="${cls}"><b>Q${escapeHtml(g.id)} - ${escapeHtml(String(score))}/100</b>: ${escapeHtml(g.comment||"")}${g.review?" [Manager Review]":""}</p>`;
+        });
+        const avg = Math.round(total/grades.length);
+        html+=`<p><b>Practice Average: ${avg}</b></p>`;
+        practicePassed = avg>=70;
+        html+=practicePassed?"✅ Practice passed! You can start the main test.":"⚠️ Practice failed. Study and try again.";
+        resultDiv.innerHTML = html;
+
+        if(practicePassed) await generateQuestions(roleSelected,false);
+    } catch(err){
+        resultDiv.textContent = "AI evaluation failed: "+(err.message||err);
+    }
+}
+
+/* --------------- Submit Main Test + Email --------------- */
+async function submitMainTest(){
+    if(!practicePassed){ alert("You must pass practice first!"); return; }
+
+    const resultDiv = document.getElementById("result");
+    resultDiv.textContent = "Evaluating main test answers... ⏳";
+
+    const answersArr = mainQuestions.map(q=>({id:q.id,answer:(document.getElementById("q"+q.id)?.value||"")}));
+    const answersText = answersArr.map(a=>`${a.id}. ${a.answer}`).join("\n\n");
+    const prompt = `You are a Roblox Studio and Lua expert. Grade these ${mainQuestions.length} answers for ${roleSelected}. Return JSON array [{"id":1,"score":95,"comment":"Good answer","review":false},...] Applicant Answers:\n${answersText}`;
+
+    try{
+        const aiResponse = await aiChat(prompt);
+        const grades = extractJSONArrayRobust(aiResponse);
+        if(!grades) throw new Error("AI evaluation failed");
+
+        let html="", total=0;
+        grades.forEach(g=>{
+            const score = Number(g.score)||0;
+            total+=score;
+            const cls = g.review?"review":(score>=70?"correct":"partial");
+            html+=`<p class="${cls}"><b>Q${escapeHtml(g.id)} - ${escapeHtml(String(score))}/100</b>: ${escapeHtml(g.comment||"")}${g.review?" [Manager Review]":""}</p>`;
+        });
+        const avg = Math.round(total/grades.length);
+        html+=`<p><b>Main Test Average: ${avg}</b></p>`;
+        html+= avg>=70?`✅ AI recommends approval for ${escapeHtml(roleSelected)}!`:`⚠️ Needs Manager review for ${escapeHtml(roleSelected)}.`;
+        resultDiv.innerHTML = html;
+
+        // Mark user as completed
+        const username = document.getElementById("username").value.trim();
+        if(!completedUsers.includes(username)){
+            completedUsers.push(username);
+            localStorage.setItem("completedUsers", JSON.stringify(completedUsers));
+        }
+
+        // Send email via Formspree
+        document.getElementById("emailName").value = username;
+        document.getElementById("emailRole").value = roleSelected;
+        document.getElementById("emailPractice").value = practiceQuestions.length>0?Math.round(grades.reduce((a,b)=>a+b.score,0)/grades.length):0;
+        document.getElementById("emailMain").value = avg;
+        document.getElementById("emailComments").value = "Review completed.";
+        document.getElementById("emailForm").submit();
+        resultDiv.innerHTML += "\n📧 Email sent to manager!";
+    } catch(err){
+        resultDiv.textContent = "AI evaluation failed: "+(err.message||err);
+    }
+}
+</script>
+
+</body>
+</html>
+
